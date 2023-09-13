@@ -172,6 +172,7 @@ spark.sql(f"use {database_name}")
 
 import time
 import random
+sc.setJobGroup("**TABLE CREATOR**", "***TABLE CREATOR***")
 # range 1440 and sleep 5 should be about 2 hours
 for i in range(1440):
     (spark.sql("insert into input_table  (select floor(rand()*100) as id, now() as event_time from input_table limit 200)"))

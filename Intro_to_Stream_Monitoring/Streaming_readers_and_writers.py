@@ -23,6 +23,24 @@
 # MAGIC %md
 # MAGIC
 # MAGIC # View the state store manager
+# MAGIC
+# MAGIC A streaming query may be stateful or stateless. It depends on the operation being performed. 
+# MAGIC
+# MAGIC Joins and aggregates typical require state management.
+# MAGIC
+# MAGIC
+# MAGIC
+# MAGIC It is a complicated topic, but in general the  use of  watermarks, or filters such as "where date - interval 1 day < now()" can help.
+# MAGIC
+# MAGIC Here is a blog post that discusses the basics.
+# MAGIC
+# MAGIC https://dataninjago.com/2022/07/16/spark-structured-streaming-deep-dive-6-stateful-operations/
+# MAGIC
+# MAGIC ### State Store Manager
+# MAGIC
+# MAGIC There is the default, and then there is an optimized manager that uses RocksDB
+# MAGIC
+# MAGIC In the following cells we will view the default, and then set to RocksDB
 
 # COMMAND ----------
 
@@ -50,6 +68,12 @@ print(spark.conf.get("spark.sql.streaming.stateStore.providerClass"))
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC
+# MAGIC # Connect to the Database created by the table generator notebook
+
+# COMMAND ----------
+
 #####
 # Extract the username, append a name to it
 # And clean out special characters
@@ -65,6 +89,12 @@ print(database_name)
 # COMMAND ----------
 
 spark.sql(f"use {database_name}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # Verify the tables created by the table generator are present
 
 # COMMAND ----------
 
@@ -103,7 +133,7 @@ spark.sql(f"use {database_name}")
 
 # MAGIC %md
 # MAGIC
-# MAGIC # Create a streaming df that requires no state management
+# MAGIC # Create a streaming dataframe that requires no state management
 
 # COMMAND ----------
 
@@ -118,7 +148,30 @@ streaming_df = (spark.readStream.format("delta").table("input_table"))
 # COMMAND ----------
 
 
-simple_stream = streaming_df.writeStream.format("noop").queryName("NoTriggerIntervalSet").start()
+simple_stream = streaming_df.writeStream.format("noop").queryName("NoTriggerIntervalNoState").start()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # Expand the Streaming Dashboard
+# MAGIC
+# MAGIC
+# MAGIC In this instance we are not approaching any limits, the incoming data is not large, but practice reviewing the metrics presented in the dashboard.
+# MAGIC
+# MAGIC Note Input and Processing rate
+# MAGIC
+# MAGIC Note Batch Duration
+# MAGIC
+# MAGIC Go to the spark UI for your cluster and choose the streaming tab, and review the metrics provided there 
+# MAGIC
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # Use Explain to view execution plan
 
 # COMMAND ----------
 
@@ -135,6 +188,12 @@ simple_stream.explain(True)
 # MAGIC Note Batch Duration
 # MAGIC
 # MAGIC Go to the spark UI for your cluster and choose the streaming tab, and review the metrics provided there
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # Stop the Stream
 
 # COMMAND ----------
 
@@ -168,6 +227,10 @@ stream_with_trigger_interval = streaming_df.writeStream.trigger(processingTime='
 # MAGIC Note Batch Duration
 # MAGIC
 # MAGIC Go to the spark UI for your cluster and choose the streaming tab
+# MAGIC
+# MAGIC The table we are streaming from is updated every 5 seconds in a loop.
+# MAGIC
+# MAGIC A trigger interval that has fewer lookups for data that return with "no change detected" will be more efficient. 
 
 # COMMAND ----------
 
@@ -186,6 +249,16 @@ stream_with_trigger_interval.stop()
 # MAGIC We have tables available from the table generator notebook that have late arriving data. 
 # MAGIC
 # MAGIC We will demonstrate reading from those tables, and using watermarking to give spark the ability to ignore late arriving data. More or less the ability to "close" windows of our windowed aggregation
+# MAGIC
+# MAGIC We will also switch from output mode complete, to output mode append.
+# MAGIC
+# MAGIC Output mode append for a windowed aggregation will require that your streams are watermarked.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # First a basic windowed aggregation
 
 # COMMAND ----------
 
@@ -203,7 +276,7 @@ windowed_df = (streaming_df.
 # MAGIC
 # MAGIC The window column is a struct, containing start, and end. 
 # MAGIC
-# MAGIC By Extreacting the start, it makes it more sortable when displayed. 
+# MAGIC By Extracting the start, it makes it more sortable when displayed. 
 
 # COMMAND ----------
 
@@ -211,7 +284,15 @@ final_df = (windowed_df.select("window.start", "id", "count"))
 
 # COMMAND ----------
 
-
+# MAGIC %md
+# MAGIC
+# MAGIC # Verify our state store is using RocksDB
+# MAGIC
+# MAGIC It is not likely that this is affecting performance for the small amount of data we are processing here. 
+# MAGIC
+# MAGIC But you could switch back to default and compare if you would like.
+# MAGIC
+# MAGIC See the default value printed in the beginning of the notebook.
 
 # COMMAND ----------
 
@@ -247,7 +328,48 @@ windowed_stream = final_df.writeStream.outputMode("complete").format("noop").que
 # MAGIC
 # MAGIC In order to complete the windowed aggregate spark must track all timestamps received in case it gets another record for that window
 # MAGIC
-# MAGIC If aggregation state continues to grow as it tracks more records, at some point memory requirements will use all available memory
+# MAGIC If aggregation state continues to grow as it tracks more records, at some point memory requirements will use all available memory.
+# MAGIC
+# MAGIC A useful check at this point would be to view the ganglia metrics.
+# MAGIC
+# MAGIC Do you see any process that is not a counter, that is using more resources with each batch? 
+# MAGIC
+# MAGIC Over time, if that continues at some point the driver will run out of memory.
+# MAGIC
+# MAGIC Also look at the heat map (only useful on a multi node cluster), you may see that the driver is under load, and a different instance type might be appropriate.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # Scheduler Pools
+# MAGIC
+# MAGIC Structured Streaming makes use of fair scheduler pools to fairly allocate slots on the cluster.
+# MAGIC
+# MAGIC It can be tricky to get to this, because the pools are torn down after each job finishes.
+# MAGIC
+# MAGIC So if you see, service not available, that is expected.
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC # Shuffle Partitions
+# MAGIC
+# MAGIC For the windowed aggregation a shuffle will be used to reorganize each tasks data so that the group by completed in the following stage
+# MAGIC
+# MAGIC Use the spark ui to see a stage with 200 shuffle partitions, and view the timeline and the task details.
+# MAGIC
+# MAGIC Note that many partitions are empty. 
+# MAGIC
+# MAGIC This is not an efficient use of resources. 
+# MAGIC
+# MAGIC Change spark.sql.shuffle.partitions to 4 for a single node cluster, 8 for a 2 node cluster. 
+
+# COMMAND ----------
+
+spark.conf.set("spark.sql.shuffle.partitions", "8")
 
 # COMMAND ----------
 
@@ -259,7 +381,9 @@ windowed_stream.stop()
 # MAGIC
 # MAGIC # Adding a watermark
 # MAGIC
-# MAGIC To best demo the watermark functionality we should start with a stream<->stream join against the two tables with late arriving data
+# MAGIC To best demo the watermark functionality we should start with a stream<->stream join against the two tables.
+# MAGIC
+# MAGIC One of the tables having late arriving data
 # MAGIC
 # MAGIC
 
@@ -288,30 +412,6 @@ windowed_stream.stop()
 
 # COMMAND ----------
 
-
-#streaming_df = (spark.readStream.format("delta").table("input_table").withWatermark("event_time", "1 minutes"))
-
-
-# COMMAND ----------
-
-##
-from pyspark.sql.functions import window
-windowed_df = (streaming_df.
-               groupBy(window(streaming_df.event_time, "1 minute"),streaming_df.id)
-               .count() 
-               )
-
-# COMMAND ----------
-
-##
-final_df_with_watermark = (windowed_df.select("window.start", "id", "count"))
-
-# COMMAND ----------
-
-##final_df_with_watermark.writeStream.outputMode("append").format("noop").start()
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC
 # MAGIC # Switch the output mode to append, and note the change in aggregation state
@@ -330,7 +430,7 @@ final_df_with_watermark = (windowed_df.select("window.start", "id", "count"))
 
 # COMMAND ----------
 
-#windowed_stream_append = windowed_df.writeStream.outputMode("append").format("noop").start()
+# windowed_stream_append = windowed_df.writeStream.outputMode("append").format("noop").start()
 
 # COMMAND ----------
 
